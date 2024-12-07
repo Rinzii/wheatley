@@ -126,8 +126,8 @@ const title_splitting_cases: {
         ],
     },
     {
-        title: "Type support (basic types, RTTI)",
-        expected: ["type support (basic types, rtti)"],
+        title: "Type support (basic configs, RTTI)",
+        expected: ["type support (basic configs, rtti)"],
     },
     {
         title: "std::basic_string<CharT,Traits,Allocator>::erase",

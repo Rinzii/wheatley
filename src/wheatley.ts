@@ -32,6 +32,9 @@ import { wheatley_database_info } from "./infra/schemata/wheatley.js";
 import { ButtonInteractionBuilder } from "./command-abstractions/button.js";
 import { LoggableChannel, LogLimiter } from "./infra/log-limiter.js";
 
+// TODO: Config system prototype
+import { environment_config, database_config, bot_config } from "./config/config.js"; // Updated config import
+
 // Thu Jul 01 2021 00:00:00 GMT-0400 (Eastern Daylight Time)
 export const SERVER_SUGGESTION_TRACKER_START_TIME = 1625112000000;
 
@@ -398,7 +401,7 @@ export class Wheatley {
         this.tracker = new MemberTracker(this);
         this.log_limiter = new LogLimiter(this);
 
-        // temporary until fixed in djs or @types/node
+        // temporary until fixed in djs or @configs/node
         (this.client as any).setMaxListeners(35);
 
         this.client.on("error", error => {
