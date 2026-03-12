@@ -32,10 +32,15 @@ import { wheatley_roles } from "../../roles.js";
  * Monkey -> Monkey
  * Start Modmail:
  *     Cancel -> All good
- *     Continue:
- *         Modal prompting for codeword, "foobar" backwards
- *             Correct codeword -> Modmail
- *             Incorrect -> Are you sure you want to make a modmail thread?
+ *     Select issue type:
+ *         General Moderation Issue -> Modmail (established users)
+ *         Voice Channel Specific Issue -> Modmail (established users)
+ *     For non-established users:
+ *         Cancel -> All good
+ *         Continue:
+ *             Modal prompting for codeword, "foobar" backwards
+ *                 Correct codeword -> Modmail
+ *                 Incorrect -> Are you sure you want to make a modmail thread?
  *
  */
 
@@ -47,17 +52,24 @@ function create_embed(title: string, msg: string) {
 }
 
 export default class Modmail extends BotComponent {
-    private roles = role_map(this.wheatley, wheatley_roles.moderators, wheatley_roles.monke);
+    private roles = role_map(
+        this.wheatley,
+        wheatley_roles.moderators,
+        wheatley_roles.voice_moderator,
+        wheatley_roles.monke,
+    );
     // Spam prevention, user is added to the timeout set when clicking the modmail_continue button,
     readonly timeout_set = new Set<string>();
 
     readonly monke_set = new SelfClearingMap<Discord.Snowflake, number>(HOUR, HOUR);
+    readonly modmail_issue_type_map = new SelfClearingMap<Discord.Snowflake, boolean>(RATELIMIT_TIME, RATELIMIT_TIME);
 
     private monkey_button!: BotButton<[]>;
     private not_monkey_button!: BotButton<[]>;
     private create_button!: BotButton<[]>;
     private abort_button!: BotButton<[]>;
     private continue_button!: BotButton<[]>;
+    private issue_type_button!: BotButton<[boolean]>;
 
     private confirm_modal!: BotModal<[]>;
 
@@ -116,6 +128,11 @@ export default class Modmail extends BotComponent {
                 this.modmail_continue_button_press.bind(this),
             ),
         );
+        this.issue_type_button = commands.add(
+            new ButtonInteractionBuilder("modmail_issue_type")
+                .add_boolean_metadata()
+                .set_handler(this.modmail_issue_type_button_press.bind(this)),
+        );
 
         this.confirm_modal = commands.add(
             new ModalInteractionBuilder("modmail_create_confirm")
@@ -152,9 +169,17 @@ export default class Modmail extends BotComponent {
         return unwrap(res).modmail_id;
     }
 
-    async create_modmail_thread(interaction: Discord.ModalSubmitInteraction | Discord.ButtonInteraction) {
+    async create_modmail_thread(
+        interaction: Discord.ModalSubmitInteraction | Discord.ButtonInteraction,
+        voice_specific?: boolean,
+    ) {
         try {
             try {
+                if (voice_specific === undefined) {
+                    voice_specific = this.modmail_issue_type_map.get(interaction.user.id) ?? false;
+                }
+                this.modmail_issue_type_map.remove(interaction.user.id);
+
                 // fetch full member
                 assert(interaction.member);
                 const member = await this.wheatley.guild.members.fetch(interaction.member.user.id);
@@ -190,11 +215,22 @@ export default class Modmail extends BotComponent {
                 // add everyone
                 await thread.members.add(member.id);
                 await thread.send({
-                    content: `<@&${this.roles.moderators.id}>`,
+                    content: voice_specific
+                        ? `<@&${this.roles.moderators.id}> <@&${this.roles.voice_moderator.id}>`
+                        : `<@&${this.roles.moderators.id}>`,
                     allowedMentions: {
-                        roles: [this.roles.moderators.id],
+                        roles: voice_specific
+                            ? [this.roles.moderators.id, this.roles.voice_moderator.id]
+                            : [this.roles.moderators.id],
                     },
                 });
+                if (voice_specific) {
+                    // Ensure role member cache is populated so we can add all voice mods
+                    await this.wheatley.guild.members.fetch();
+                    for (const voice_mod of this.roles.voice_moderator.members.values()) {
+                        await thread.members.add(voice_mod.id);
+                    }
+                }
             } catch (e) {
                 if (interaction instanceof Discord.ModalSubmitInteraction) {
                     assert(interaction.isFromMessage());
@@ -242,7 +278,7 @@ export default class Modmail extends BotComponent {
                 "Hello and welcome to Together C&C++ :wave: Please read before pressing buttons and only " +
                 "use the modmail system when there is an __issue requiring staff attention__.",
             files: ["https://i.kym-cdn.com/photos/images/newsfeed/001/919/939/366.jpg"],
-            ephemeral: true,
+            flags: Discord.MessageFlags.Ephemeral,
         });
         await this.log_action(interaction.member, "Monkey pressed the button");
         await this.database.monke_button_presses.insertOne({
@@ -263,7 +299,7 @@ export default class Modmail extends BotComponent {
 
     async not_monkey_button_press(interaction: Discord.ButtonInteraction) {
         await interaction.deferReply({
-            ephemeral: true,
+            flags: Discord.MessageFlags.Ephemeral,
         });
         await this.log_action(interaction.member, "Monkey pressed the not monkey button");
         const member = await this.wheatley.guild.members.fetch(interaction.user.id);
@@ -295,40 +331,69 @@ export default class Modmail extends BotComponent {
     async modmail_create_button_press(interaction: Discord.ButtonInteraction) {
         if (this.timeout_set.has(interaction.user.id)) {
             await interaction.reply({
-                ephemeral: true,
+                flags: Discord.MessageFlags.Ephemeral,
                 content: "Please don't spam modmail requests -- This button has a 5 minute cooldown",
             });
             await this.log_action(interaction.member, "Modmail button spammed");
         } else {
-            if (await this.wheatley.is_established_member(interaction.user)) {
-                // fast-path established members
-                await interaction.deferReply({
-                    ephemeral: true,
-                });
-                await this.create_modmail_thread(interaction);
-                await interaction.editReply({
-                    content:
-                        "Your modmail request has been processed. A thread has been created and the staff " +
-                        "team have been notified.",
-                    components: [],
-                });
-                await this.log_action(interaction.member, "Modmail button pressed, fast path");
-            } else {
-                // make sure they can read
-                const row = new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
-                    this.abort_button.create_button().setLabel("Cancel").setStyle(Discord.ButtonStyle.Primary),
-                    this.continue_button.create_button().setLabel("Continue").setStyle(Discord.ButtonStyle.Danger),
-                );
-                await interaction.reply({
-                    ephemeral: true,
-                    content:
-                        "Please only submit a modmail request if you have a server issue requiring staff " +
-                        'attention! If you really intend to submit a modmail request enter the word "foobar" ' +
-                        "backwards when prompted",
-                    components: [row],
-                });
-                await this.log_action(interaction.member, "Modmail button pressed");
-            }
+            const row = new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
+                this.issue_type_button
+                    .create_button(false)
+                    .setLabel("General Moderation Issue")
+                    .setStyle(Discord.ButtonStyle.Primary),
+                this.issue_type_button
+                    .create_button(true)
+                    .setLabel("Voice Channel Specific Issue")
+                    .setStyle(Discord.ButtonStyle.Secondary),
+            );
+            const cancel_row = new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
+                this.abort_button.create_button().setLabel("Cancel").setStyle(Discord.ButtonStyle.Secondary),
+            );
+            await interaction.reply({
+                flags: Discord.MessageFlags.Ephemeral,
+                content: "What type of issue is this?",
+                components: [row, cancel_row],
+            });
+            await this.log_action(interaction.member, "Modmail button pressed");
+        }
+    }
+
+    async modmail_issue_type_button_press(interaction: Discord.ButtonInteraction, voice_specific: boolean) {
+        if (await this.wheatley.is_established_member(interaction.user)) {
+            await interaction.update({
+                content: "Creating modmail thread...",
+                components: [],
+            });
+            await this.create_modmail_thread(interaction, voice_specific);
+            await interaction.editReply({
+                content:
+                    "Your modmail request has been processed. A thread has been created and the staff " +
+                    "team have been notified.",
+                components: [],
+            });
+            await this.log_action(
+                interaction.member,
+                `Modmail issue type selected (${voice_specific ? "voice" : "general"}), fast path`,
+            );
+        } else {
+            this.modmail_issue_type_map.set(interaction.user.id, voice_specific);
+
+            // make sure they can read
+            const row = new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
+                this.abort_button.create_button().setLabel("Cancel").setStyle(Discord.ButtonStyle.Primary),
+                this.continue_button.create_button().setLabel("Continue").setStyle(Discord.ButtonStyle.Danger),
+            );
+            await interaction.update({
+                content:
+                    "Please only submit a modmail request if you have a server issue requiring staff " +
+                    'attention! If you really intend to submit a modmail request enter the word "foobar" ' +
+                    "backwards when prompted",
+                components: [row],
+            });
+            await this.log_action(
+                interaction.member,
+                `Modmail issue type selected (${voice_specific ? "voice" : "general"})`,
+            );
         }
     }
 
