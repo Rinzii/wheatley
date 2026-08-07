@@ -10,7 +10,7 @@ const LLM_REGEX = /\b(?<!!)llms?\b/gi;
 const MICROSLOP_REGEX = /\b(?<!!)(?<![./])microsoft?\b/gi;
 
 const LLM_AUTOREPLY_ENABLED = false;
-const MICROSLOP_AUTOREPLY_ENABLED = true;
+const MICROSLOP_AUTOREPLY_ENABLED = false;
 const RATELIMIT_DURATION = 1 * DAY;
 const RATELIMIT_PROBABILITY = 0.2;
 
