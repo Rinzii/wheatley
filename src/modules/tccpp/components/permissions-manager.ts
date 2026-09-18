@@ -376,10 +376,10 @@ export default class PermissionManager extends BotComponent {
         this.add_channel_overwrite(this.channels.public_action_log.id, {
             ...read_only_channel_no_reactions,
         });
-        this.add_channel_overwrite(this.channels.serious_off_topic.id, {
-            ...off_topic_permissions,
-            [this.roles.no_serious_off_topic.id]: no_interaction_at_all,
-        });
+        // this.add_channel_overwrite(this.channels.serious_off_topic.id, {
+        //     ...off_topic_permissions,
+        //     [this.roles.no_serious_off_topic.id]: no_interaction_at_all,
+        // });
         this.add_channel_overwrite(this.channels.room_of_requirement.id, {
             ...off_topic_permissions,
             [this.roles.moderators.id]: {
