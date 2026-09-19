@@ -66,17 +66,12 @@ export default class GuildLookup extends BotComponent {
         const guild = await this.wheatley.client.guilds.fetch(guild_id);
         await guild.channels.fetch();
 
-        // guild.channels.cache can include threads (which don't have a position).
-        // Sort primarily by position when available otherwise push to the end.
+        // guild.channels.cache can include threads, which don't have rawPosition.
+        // Sort non-thread channels by raw position and place threads at the end.
         const channels = [...guild.channels.cache.values()].sort((a, b) => {
-            const pos_a =
-                "rawPosition" in a && typeof (a as any).rawPosition === "number"
-                    ? ((a as any).rawPosition as number)
-                    : Number.MAX_SAFE_INTEGER;
-            const pos_b =
-                "rawPosition" in b && typeof (b as any).rawPosition === "number"
-                    ? ((b as any).rawPosition as number)
-                    : Number.MAX_SAFE_INTEGER;
+            const pos_a = a.isThread() ? Number.MAX_SAFE_INTEGER : a.rawPosition;
+            const pos_b = b.isThread() ? Number.MAX_SAFE_INTEGER : b.rawPosition;
+        
             return pos_a - pos_b || a.id.localeCompare(b.id);
         });
         const pages = Math.ceil(channels.length / CHANNELS_PER_PAGE);
