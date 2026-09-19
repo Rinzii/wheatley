@@ -326,57 +326,50 @@ export class BotTextBasedCommand<Args extends unknown[] = []> extends BaseBotInt
                             throw required_arg_error();
                         }
                     }
-                } else {
-                    switch (option.type) {
-                        case "role": {
-                            const re = new RegExp(
-                                this.wheatley.guild.roles.cache
-                                    .map(role => escape_regex(role.name))
-                                    .filter(name => name !== "@everyone")
-                                    .join("|"),
-                                "i",
-                            );
-                            const match = command_body.match(re);
-                            if (match) {
-                                command_options.push(
-                                    unwrap(
-                                        this.wheatley.guild.roles.cache.find(
-                                            role => role.name.toLowerCase() === match[0].toLowerCase(),
-                                        ),
-                                    ),
-                                );
-                                command_body = command_body.slice(match[0].length).trim();
-                            } else if (!option.required) {
-                                command_options.push(null);
-                            } else {
-                                throw required_arg_error();
-                            }
-                            break;
-                        }
-                        case "channel": {
-                            const re = /^(?:<#(\d{10,})>|(\d{10,}))/;
-                            const match = re.exec(command_body);
-                            if (!match) {
-                                if (option.required) {
-                                    throw required_arg_error();
-                                }
-                                command_options.push(null);
-                            } else {
-                                const channel_id = match[1] || match[2];
-                                const guild = await command_obj.get_guild();
-                                const channel = await guild.channels.fetch(channel_id).catch(() => null);
-                                if (!channel) {
-                                    await reply_with_error(`Unable to find channel`, true);
-                                    return;
-                                }
-                                command_options.push(channel);
-                                command_body = command_body.slice(match[0].length).trim();
-                            }
-                            break;
-                        }
-                        default:
-                            assert(false, "unhandled option type");
+                } else if (option.type == "role") {
+                    const re = new RegExp(
+                        this.wheatley.guild.roles.cache
+                            .map(role => escape_regex(role.name))
+                            .filter(name => name !== "@everyone")
+                            .join("|"),
+                        "i",
+                    );
+                    const match = command_body.match(re);
+                    if (match) {
+                        command_options.push(
+                            unwrap(
+                                this.wheatley.guild.roles.cache.find(
+                                    role => role.name.toLowerCase() === match[0].toLowerCase(),
+                                ),
+                            ),
+                        );
+                        command_body = command_body.slice(match[0].length).trim();
+                    } else if (!option.required) {
+                        command_options.push(null);
+                    } else {
+                        throw required_arg_error();
                     }
+                } else if (option.type == "channel") {
+                    const re = /^(?:<#(\d{10,})>|(\d{10,}))/;
+                    const match = re.exec(command_body);
+                    if (!match) {
+                        if (option.required) {
+                            throw required_arg_error();
+                        }
+                        command_options.push(null);
+                    } else {
+                        const channel_id = match[1] || match[2];
+                        const guild = await command_obj.get_guild();
+                        const channel = await guild.channels.fetch(channel_id).catch(() => null);
+                        if (!channel) {
+                            await reply_with_error(`Unable to find channel`, true);
+                            return;
+                        }
+                        command_options.push(channel);
+                        command_body = command_body.slice(match[0].length).trim();
+                    }
+                } else {
+                    assert(false, "unhandled option type");
                 }
             } catch (e) {
                 if (e instanceof ParseError) {
