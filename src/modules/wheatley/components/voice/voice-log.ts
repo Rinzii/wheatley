@@ -379,7 +379,7 @@ export default class VoiceLog extends BotComponent {
             if (target_type === "user") {
                 target = await interaction.client.users.fetch(target_id);
             } else if (target_type == "channel") {
-                const channel = await this.wheatley.guild.channels.fetch(target_id);
+                const channel = await this.wheatley.guild.channels.fetch(target_id).catch(_ => {});
                 if (!channel?.isVoiceBased()) {
                     const { embeds } = create_error_reply("Error: voice channel no longer exists");
                     await interaction.followUp({ ephemeral: true, embeds });
