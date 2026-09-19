@@ -9,11 +9,12 @@ import {
 } from "../../../../command-abstractions/text-based-command-builder.js";
 import { TextBasedCommand } from "../../../../command-abstractions/text-based-command.js";
 import { BotButton, ButtonInteractionBuilder } from "../../../../command-abstractions/button.js";
-import { SelfClearingMap } from "../../../../utils/containers.js";
 import { discord_timestamp } from "../../../../utils/discord.js";
 import { create_error_reply } from "../../../../wheatley.js";
+import type { Filter } from "mongodb";
 
-type voice_log_event_kind = "join" | "leave";
+type voice_log_event_kind = "join" | "leave" | "move";
+type target_type = "user" | "channel";
 
 type voice_log_event = {
     kind: voice_log_event_kind;
@@ -27,15 +28,16 @@ type voice_log_event = {
 };
 
 const JOIN_HISTORY_WINDOW = WEEK;
-const JOIN_HISTORY_TTL = 2 * WEEK;
-const JOIN_HISTORY_MAX_ENTRIES_PER_CHANNEL = 200;
 const JOIN_HISTORY_MAX_N_OUTPUT = 200;
 const JOIN_HISTORY_PAGE_SIZE = 10;
 
+const DEFAULT_HISTORY_AMOUNT = 10;
+
 export default class VoiceLog extends BotComponent {
-    private readonly event_history = new SelfClearingMap<string, voice_log_event[]>(JOIN_HISTORY_TTL);
-    private voice_log_page_button!: BotButton<[string, number, number, string]>;
+    private voice_log_page_button!: BotButton<[target_type, string, number, number, string]>;
     private voice_log_delete_button!: BotButton<[string]>;
+
+    private readonly database = this.wheatley.database.create_proxy<{ voice_log_events: voice_log_event }>();
 
     static override get is_freestanding() {
         return true;
@@ -55,6 +57,11 @@ export default class VoiceLog extends BotComponent {
                             required: false,
                             channel_types: [Discord.ChannelType.GuildVoice, Discord.ChannelType.GuildStageVoice],
                         })
+                        .add_user_option({
+                            title: "user",
+                            description: "User to get logs from",
+                            required: false,
+                        })
                         .add_number_option({
                             title: "amount",
                             description: `Number of most recent events to show (1-${JOIN_HISTORY_MAX_N_OUTPUT})`,
@@ -66,7 +73,8 @@ export default class VoiceLog extends BotComponent {
 
         this.voice_log_page_button = commands.add(
             new ButtonInteractionBuilder("voice_log_page")
-                // channel_id: string, n: number, page: number, issuer_id: string
+                // type: target_type, user_id: string, amount: number, page: number, issuer_id: string
+                .add_string_metadata()
                 .add_string_metadata()
                 .add_number_metadata()
                 .add_number_metadata()
@@ -88,6 +96,7 @@ export default class VoiceLog extends BotComponent {
         if (new_state.guild.id !== this.wheatley.guild.id) {
             return;
         }
+
         const member = new_state.member ?? old_state.member;
         if (!member || member.user.bot) {
             return;
@@ -98,76 +107,91 @@ export default class VoiceLog extends BotComponent {
             return;
         }
 
-        const now = Date.now();
-        const cutoff = now - JOIN_HISTORY_WINDOW;
-
-        const record = (channel_id: string, kind: voice_log_event_kind, other_channel_id: string | null) => {
-            const key = `${new_state.guild.id}:${channel_id}`;
-            const prev = this.event_history.get(key) ?? [];
-            const next = prev.filter(e => e.at_ms >= cutoff);
-            next.push({
+        const record = async (channel_id: string, kind: voice_log_event_kind, other_channel_id: string | null) => {
+            const entry: voice_log_event = {
                 kind,
                 guild_id: new_state.guild.id,
                 channel_id,
                 user_id: member.id,
-                at_ms: now,
+                at_ms: Date.now(),
                 other_channel_id,
                 display_name: member.displayName,
                 username: member.user.username,
-            });
-            if (next.length > JOIN_HISTORY_MAX_ENTRIES_PER_CHANNEL) {
-                next.splice(0, next.length - JOIN_HISTORY_MAX_ENTRIES_PER_CHANNEL);
-            }
-            this.event_history.set(key, next);
+            };
+
+            await this.database.voice_log_events.insertOne(entry);
         };
 
         // Join
         if (old_state.channelId == null && new_state.channelId != null) {
-            record(new_state.channelId, "join", null);
+            await record(new_state.channelId, "join", null);
             return;
         }
 
         // Leave
         if (old_state.channelId != null && new_state.channelId == null) {
-            record(old_state.channelId, "leave", null);
+            await record(old_state.channelId, "leave", null);
             return;
         }
 
         // Move: record leave in old channel and join in new channel
         if (old_state.channelId != null && new_state.channelId != null) {
-            record(old_state.channelId, "leave", new_state.channelId);
-            record(new_state.channelId, "join", old_state.channelId);
+            await record(old_state.channelId, "move", new_state.channelId);
         }
     }
 
-    private get_recent_events(target_channel: Discord.VoiceBasedChannel, effective_n: number): voice_log_event[] {
-        const key = `${this.wheatley.guild.id}:${target_channel.id}`;
-        const events = this.event_history.get(key) ?? [];
+    private async get_recent_events(
+        target: Discord.User | Discord.VoiceBasedChannel,
+        amount: number = DEFAULT_HISTORY_AMOUNT,
+    ): Promise<Array<voice_log_event>> {
         const cutoff = Date.now() - JOIN_HISTORY_WINDOW;
-        const recent = events.filter(e => e.at_ms >= cutoff);
-        // Display newest events first so the log reads top-to-bottom from newest to oldest.
-        return recent.slice(-effective_n).reverse();
+
+        const filter: Filter<voice_log_event> = {
+            guild_id: this.wheatley.guild.id,
+            at_ms: {
+                $gte: cutoff,
+            },
+        };
+
+        if (target instanceof Discord.User) {
+            filter.user_id = target.id;
+        } else {
+            filter.$or = [
+                {
+                    channel_id: target.id,
+                },
+                {
+                    kind: "move",
+                    other_channel_id: target.id,
+                },
+            ];
+        }
+
+        return await this.database.voice_log_events.find(filter).sort({ at_ms: -1 }).limit(amount).toArray();
     }
 
-    private build_log_message(
-        target_channel: Discord.VoiceBasedChannel,
-        effective_n: number,
+    private async build_log_message(
+        target: Discord.User | Discord.VoiceBasedChannel,
+        effective_amount: number,
         page: number,
         issuer_id: string,
-    ): Discord.BaseMessageOptions {
-        const newest_first = this.get_recent_events(target_channel, effective_n);
+    ): Promise<Discord.BaseMessageOptions> {
+        const newest_first = await this.get_recent_events(target, effective_amount);
+
         const delete_button = this.voice_log_delete_button
             .create_button(issuer_id)
             .setLabel("Delete")
             .setEmoji("🗑️")
             .setStyle(Discord.ButtonStyle.Danger);
 
+        const target_name = target instanceof Discord.User ? target.username : target.name;
+
         if (newest_first.length === 0) {
             return {
                 embeds: [
                     new Discord.EmbedBuilder()
                         .setColor(colors.wheatley)
-                        .setDescription(`No voice history recorded for **${target_channel.name}**.`),
+                        .setDescription(`No voice history recorded for **${target_name}**.`),
                 ],
                 components: [
                     new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
@@ -180,16 +204,22 @@ export default class VoiceLog extends BotComponent {
 
         const entries = newest_first.map(e => {
             const name = e.display_name || e.username || e.user_id;
-            let move = "";
-            if (e.other_channel_id != null) {
-                move = e.kind === "join" ? ` • from <#${e.other_channel_id}>` : ` • to <#${e.other_channel_id}>`;
-            }
-            const kind = e.kind === "join" ? "🟩 **JOIN**" : "🟥 **LEAVE**";
+
+            const kind = e.kind == "move" ? "➡️ **MOVE**" : e.kind === "join" ? "🟩 **JOIN**" : "🟥 **LEAVE**";
             const when = `${discord_timestamp(e.at_ms, "f")} (${discord_timestamp(e.at_ms, "T")})`;
+
+            const location =
+                e.kind == "move"
+                    ? ` • <#${e.channel_id}> to <#${e.other_channel_id}>`
+                    : target instanceof Discord.User
+                      ? e.kind === "join"
+                          ? ` • joined <#${e.channel_id}>`
+                          : ` • left <#${e.channel_id}>`
+                      : ""; // <- forever lonely :^) (pleasing tenary)
 
             // Two-line layout for easier scanning.
             // Note: `allowedMentions: { parse: [] }` keeps the mention clickable without pinging.
-            return [`${kind} — ${when}`, `**${name}** (\`${e.username}\`) • <@${e.user_id}>${move}`].join("\n");
+            return [`${kind} — ${when}`, `**${name}** (\`${e.username}\`) • <@${e.user_id}>${location}`].join("\n");
         });
 
         const pages = Math.ceil(entries.length / JOIN_HISTORY_PAGE_SIZE);
@@ -204,19 +234,25 @@ export default class VoiceLog extends BotComponent {
             .setColor(colors.wheatley)
             .setTitle(
                 pages > 1
-                    ? `Voice log for ${target_channel.name} (page ${clamped_page + 1} of ${pages})`
-                    : `Voice log for ${target_channel.name}`,
+                    ? `Voice log for ${target_name} (page ${clamped_page + 1} of ${pages})`
+                    : `Voice log for ${target_name}`,
             )
             .setDescription(page_entries.join(separator))
             .setFooter({
-                text: `${entries.length} event${entries.length === 1 ? "" : "s"} shown (max ${effective_n})`,
+                text: `${entries.length} event${entries.length === 1 ? "" : "s"} shown (max ${effective_amount})`,
             });
 
         const page_buttons: Discord.ButtonBuilder[] = [];
         if (pages > 1 && clamped_page > 1) {
             page_buttons.push(
                 this.voice_log_page_button
-                    .create_button(target_channel.id, effective_n, 0, issuer_id)
+                    .create_button(
+                        target instanceof Discord.User ? "user" : "channel",
+                        target.id,
+                        effective_amount,
+                        0,
+                        issuer_id,
+                    )
                     .setLabel("Start")
                     .setStyle(Discord.ButtonStyle.Secondary),
             );
@@ -224,7 +260,13 @@ export default class VoiceLog extends BotComponent {
         if (pages > 1 && clamped_page > 0) {
             page_buttons.push(
                 this.voice_log_page_button
-                    .create_button(target_channel.id, effective_n, clamped_page - 1, issuer_id)
+                    .create_button(
+                        target instanceof Discord.User ? "user" : "channel",
+                        target.id,
+                        effective_amount,
+                        clamped_page - 1,
+                        issuer_id,
+                    )
                     .setLabel("Previous")
                     .setStyle(Discord.ButtonStyle.Primary),
             );
@@ -232,7 +274,13 @@ export default class VoiceLog extends BotComponent {
         if (pages > 1 && clamped_page < pages - 1) {
             page_buttons.push(
                 this.voice_log_page_button
-                    .create_button(target_channel.id, effective_n, clamped_page + 1, issuer_id)
+                    .create_button(
+                        target instanceof Discord.User ? "user" : "channel",
+                        target.id,
+                        effective_amount,
+                        clamped_page + 1,
+                        issuer_id,
+                    )
                     .setLabel("Next")
                     .setStyle(Discord.ButtonStyle.Primary),
             );
@@ -254,10 +302,20 @@ export default class VoiceLog extends BotComponent {
         };
     }
 
-    private async handle_log(command: TextBasedCommand, channel: Discord.Channel | null, amount: number | null) {
+    private async handle_log(
+        command: TextBasedCommand,
+        channel: Discord.Channel | null,
+        user: Discord.User | null,
+        amount: number | null,
+    ) {
         const guild = await command.get_guild();
 
         let target_channel: Discord.VoiceBasedChannel | null = null;
+
+        if (channel && user) {
+            await command.reply(create_error_reply("Error: you must specify either `channel` or `user` but not both"));
+            return;
+        }
 
         if (channel) {
             if (!channel.isVoiceBased()) {
@@ -265,7 +323,9 @@ export default class VoiceLog extends BotComponent {
                 return;
             }
             target_channel = channel;
-        } else {
+        }
+
+        if (!target_channel && !user) {
             const member = await command.get_member(guild);
             target_channel = member.voice.channel;
             if (!target_channel) {
@@ -274,22 +334,25 @@ export default class VoiceLog extends BotComponent {
             }
         }
 
-        const requested_amount = amount ?? 1;
+        const requested_amount = amount ?? DEFAULT_HISTORY_AMOUNT;
         if (amount !== null) {
             if (!Number.isInteger(amount) || amount < 1) {
                 await command.reply(create_error_reply("Error: if provided, `amount` must be at least 1"));
                 return;
             }
         }
-        const effective_amount = Math.min(requested_amount, JOIN_HISTORY_MAX_N_OUTPUT);
 
-        await command.reply(this.build_log_message(target_channel, effective_amount, 0, command.user.id));
+        const effective_amount = Math.min(requested_amount, JOIN_HISTORY_MAX_N_OUTPUT);
+        await command.reply(
+            await this.build_log_message((target_channel ?? user)!, effective_amount, 0, command.user.id),
+        );
     }
 
     private async handle_log_page(
         interaction: Discord.ButtonInteraction,
-        channel_id: string,
-        n: number,
+        target_type: string,
+        target_id: string,
+        amount: number,
         page: number,
         issuer_id: string,
     ) {
@@ -306,15 +369,30 @@ export default class VoiceLog extends BotComponent {
             // Acknowledge quickly to avoid "This interaction failed" on slower API calls.
             await interaction.deferUpdate();
 
-            const channel = await this.wheatley.guild.channels.fetch(channel_id);
-            if (!channel?.isVoiceBased()) {
-                const { embeds } = create_error_reply("Error: voice channel no longer exists");
-                await interaction.followUp({ ephemeral: true, embeds });
+            let target: Discord.User | Discord.VoiceBasedChannel;
+            if (target_type === "user") {
+                target = await interaction.client.users.fetch(target_id);
+            } else if (target_type == "channel") {
+                const channel = await this.wheatley.guild.channels.fetch(target_id);
+                if (!channel?.isVoiceBased()) {
+                    const { embeds } = create_error_reply("Error: voice channel no longer exists");
+                    await interaction.followUp({ ephemeral: true, embeds });
+                    return;
+                }
+
+                target = channel;
+            } else {
+                const { embeds } = create_error_reply(`Unknown target type: ${target_type}`);
+                await interaction.followUp({
+                    ephemeral: true,
+                    embeds,
+                });
+
                 return;
             }
 
-            const effective_n = Math.min(Math.max(1, Math.floor(n)), JOIN_HISTORY_MAX_N_OUTPUT);
-            await interaction.message.edit(this.build_log_message(channel, effective_n, page, issuer_id));
+            const effective_amount = Math.min(Math.max(1, Math.floor(amount)), JOIN_HISTORY_MAX_N_OUTPUT);
+            await interaction.message.edit(await this.build_log_message(target, effective_amount, page, issuer_id));
         } catch (e) {
             const { embeds } = create_error_reply(`Error: ${e}`);
             if (interaction.deferred || interaction.replied) {
