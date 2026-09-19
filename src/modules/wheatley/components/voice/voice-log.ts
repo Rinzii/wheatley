@@ -1,6 +1,6 @@
 import * as Discord from "discord.js";
 
-import { colors, WEEK } from "../../../../common.js";
+import { colors, DAY, MONTH, WEEK } from "../../../../common.js";
 import { BotComponent } from "../../../../bot-component.js";
 import { CommandSetBuilder } from "../../../../command-abstractions/command-set-builder.js";
 import {
@@ -33,6 +33,8 @@ const JOIN_HISTORY_PAGE_SIZE = 10;
 
 const DEFAULT_HISTORY_AMOUNT = 10;
 
+const VOICE_EVENT_HISTORY_RETAIN_TIME = MONTH;
+
 export default class VoiceLog extends BotComponent {
     private voice_log_page_button!: BotButton<[target_type, string, number, number, string]>;
     private voice_log_delete_button!: BotButton<[string]>;
@@ -44,6 +46,10 @@ export default class VoiceLog extends BotComponent {
     }
 
     override async setup(commands: CommandSetBuilder) {
+        // Prune the voice history frequently
+        await this.prune_voice_history();
+        setInterval(() => void this.prune_voice_history().catch(this.wheatley.critical_error.bind(this.wheatley)), DAY);
+
         commands.add(
             new TextBasedCommandBuilder("voice", EarlyReplyMode.ephemeral)
                 .set_description("Voice moderation")
@@ -420,5 +426,13 @@ export default class VoiceLog extends BotComponent {
             // `deferUpdate()` means we must follow-up on failure.
             await interaction.followUp({ ephemeral: true, embeds });
         }
+    }
+
+    private async prune_voice_history(): Promise<void> {
+        await this.database.voice_log_events.deleteMany({
+            at_ms: {
+                $lt: Date.now() - VOICE_EVENT_HISTORY_RETAIN_TIME,
+            },
+        });
     }
 }
