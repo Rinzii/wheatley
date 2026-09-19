@@ -7,10 +7,7 @@ import {
     EarlyReplyMode,
     TextBasedCommandBuilder,
 } from "../../../../command-abstractions/text-based-command-builder.js";
-import {
-    CommandAbstractionReplyOptions,
-    TextBasedCommand,
-} from "../../../../command-abstractions/text-based-command.js";
+import { TextBasedCommand } from "../../../../command-abstractions/text-based-command.js";
 import { BotButton, ButtonInteractionBuilder } from "../../../../command-abstractions/button.js";
 import { SelfClearingMap } from "../../../../utils/containers.js";
 import { discord_timestamp } from "../../../../utils/discord.js";
@@ -34,27 +31,11 @@ const JOIN_HISTORY_TTL = 2 * WEEK;
 const JOIN_HISTORY_MAX_ENTRIES_PER_CHANNEL = 200;
 const JOIN_HISTORY_MAX_N_OUTPUT = 200;
 const JOIN_HISTORY_PAGE_SIZE = 10;
-const DEV_VOICE_BOUNCE_MAX_COUNT = 100;
-
-type dev_voice_bounce_task = {
-    keep_running: boolean;
-};
-
-type dev_voice_bounce_context = {
-    task_id: string;
-    issuer_id: string;
-    target_member: Discord.GuildMember;
-    first: Discord.VoiceBasedChannel;
-    second: Discord.VoiceBasedChannel;
-    count: number;
-};
 
 export default class VoiceLog extends BotComponent {
     private readonly event_history = new SelfClearingMap<string, voice_log_event[]>(JOIN_HISTORY_TTL);
     private voice_log_page_button!: BotButton<[string, number, number, string]>;
     private voice_log_delete_button!: BotButton<[string]>;
-    private readonly dev_voice_bounce_tasks = new SelfClearingMap<string, dev_voice_bounce_task>(WEEK);
-    private dev_voice_bounce_stop_button!: BotButton<[string, string]>;
 
     static override get is_freestanding() {
         return true;
@@ -75,45 +56,13 @@ export default class VoiceLog extends BotComponent {
                             channel_types: [Discord.ChannelType.GuildVoice, Discord.ChannelType.GuildStageVoice],
                         })
                         .add_number_option({
-                            title: "n",
+                            title: "amount",
                             description: `Number of most recent events to show (1-${JOIN_HISTORY_MAX_N_OUTPUT})`,
                             required: false,
                         })
                         .set_handler(this.handle_log.bind(this)),
                 ),
         );
-
-        if (this.wheatley.devmode_enabled) {
-            commands.add(
-                new TextBasedCommandBuilder("dev-voice-bounce", EarlyReplyMode.ephemeral)
-                    .set_category("Hidden")
-                    .set_description("Dev helper: move a member between two voice channels repeatedly")
-                    .set_permissions(Discord.PermissionFlagsBits.MoveMembers)
-                    .add_channel_option({
-                        title: "first",
-                        description: "First voice channel",
-                        required: true,
-                        channel_types: [Discord.ChannelType.GuildVoice, Discord.ChannelType.GuildStageVoice],
-                    })
-                    .add_channel_option({
-                        title: "second",
-                        description: "Second voice channel",
-                        required: true,
-                        channel_types: [Discord.ChannelType.GuildVoice, Discord.ChannelType.GuildStageVoice],
-                    })
-                    .add_number_option({
-                        title: "count",
-                        description: `Number of round trips to run (1-${DEV_VOICE_BOUNCE_MAX_COUNT})`,
-                        required: true,
-                    })
-                    .add_user_option({
-                        title: "user",
-                        description: "Member to move (defaults to yourself)",
-                        required: false,
-                    })
-                    .set_handler(this.handle_dev_voice_bounce.bind(this)),
-            );
-        }
 
         this.voice_log_page_button = commands.add(
             new ButtonInteractionBuilder("voice_log_page")
@@ -132,14 +81,6 @@ export default class VoiceLog extends BotComponent {
                 .add_user_id_metadata()
                 .set_permissions(Discord.PermissionFlagsBits.MuteMembers)
                 .set_handler(this.handle_delete_log.bind(this)),
-        );
-
-        this.dev_voice_bounce_stop_button = commands.add(
-            new ButtonInteractionBuilder("dev_voice_bounce_stop")
-                .add_string_metadata()
-                .add_user_id_metadata()
-                .set_permissions(Discord.PermissionFlagsBits.MoveMembers)
-                .set_handler(this.handle_dev_voice_bounce_stop.bind(this)),
         );
     }
 
@@ -313,7 +254,7 @@ export default class VoiceLog extends BotComponent {
         };
     }
 
-    private async handle_log(command: TextBasedCommand, channel: Discord.Channel | null, n: number | null) {
+    private async handle_log(command: TextBasedCommand, channel: Discord.Channel | null, amount: number | null) {
         const guild = await command.get_guild();
 
         let target_channel: Discord.VoiceBasedChannel | null = null;
@@ -333,188 +274,16 @@ export default class VoiceLog extends BotComponent {
             }
         }
 
-        const requested_n = n ?? 1;
-        if (n !== null) {
-            if (!Number.isInteger(n) || n < 1) {
-                await command.reply(create_error_reply("Error: if provided, `n` must be at least 1"));
+        const requested_amount = amount ?? 1;
+        if (amount !== null) {
+            if (!Number.isInteger(amount) || amount < 1) {
+                await command.reply(create_error_reply("Error: if provided, `amount` must be at least 1"));
                 return;
             }
         }
-        const effective_n = Math.min(requested_n, JOIN_HISTORY_MAX_N_OUTPUT);
+        const effective_amount = Math.min(requested_amount, JOIN_HISTORY_MAX_N_OUTPUT);
 
-        await command.reply(this.build_log_message(target_channel, effective_n, 0, command.user.id));
-    }
-
-    private async handle_dev_voice_bounce(
-        command: TextBasedCommand,
-        first: Discord.Channel,
-        second: Discord.Channel,
-        count: number,
-        user: Discord.User | null,
-    ) {
-        const task_id = command.get_command_invocation_snowflake();
-        try {
-            if (!this.wheatley.devmode_enabled) {
-                await command.replyOrFollowUp(
-                    create_error_reply("Error: this command is only available in dev mode"),
-                    true,
-                );
-                return;
-            }
-            if (!first.isVoiceBased() || !second.isVoiceBased()) {
-                await command.replyOrFollowUp(
-                    create_error_reply("Error: both channels must be voice channels or stage channels"),
-                    true,
-                );
-                return;
-            }
-            if (first.id === second.id) {
-                await command.replyOrFollowUp(create_error_reply("Error: channels must be different"), true);
-                return;
-            }
-            if (!Number.isInteger(count) || count < 1 || count > DEV_VOICE_BOUNCE_MAX_COUNT) {
-                await command.replyOrFollowUp(
-                    create_error_reply(`Error: count must be an integer from 1 to ${DEV_VOICE_BOUNCE_MAX_COUNT}`),
-                    true,
-                );
-                return;
-            }
-
-            const target_user = user ?? command.user;
-            const target_member = await this.wheatley.try_fetch_guild_member(target_user);
-            if (!target_member) {
-                await command.replyOrFollowUp(create_error_reply("Error: target user is not in the server"), true);
-                return;
-            }
-            if (!target_member.voice.channel) {
-                await command.replyOrFollowUp(
-                    create_error_reply("Error: target user must already be connected to a voice channel"),
-                    true,
-                );
-                return;
-            }
-
-            let completed_round_trips = 0;
-            const bounce_context: dev_voice_bounce_context = {
-                task_id,
-                issuer_id: command.user.id,
-                target_member,
-                first,
-                second,
-                count,
-            };
-            this.dev_voice_bounce_tasks.set(task_id, { keep_running: true });
-            await command.replyOrFollowUp(
-                this.build_dev_voice_bounce_message(bounce_context, completed_round_trips, "Running...", true),
-                true,
-            );
-
-            for (let i = 0; i < count; i++) {
-                if (!this.dev_voice_bounce_tasks.get(task_id)?.keep_running) {
-                    break;
-                }
-                await target_member.voice.setChannel(first);
-                if (!this.dev_voice_bounce_tasks.get(task_id)?.keep_running) {
-                    break;
-                }
-                await target_member.voice.setChannel(second);
-                completed_round_trips++;
-                const keep_running = this.dev_voice_bounce_tasks.get(task_id)?.keep_running ?? false;
-                await command.edit(
-                    this.build_dev_voice_bounce_message(
-                        bounce_context,
-                        completed_round_trips,
-                        keep_running ? "Running..." : "Stopping...",
-                        keep_running,
-                    ),
-                );
-            }
-
-            const stopped_early = !this.dev_voice_bounce_tasks.get(task_id)?.keep_running;
-            this.dev_voice_bounce_tasks.remove(task_id);
-            await command.edit(
-                this.build_dev_voice_bounce_message(
-                    bounce_context,
-                    completed_round_trips,
-                    stopped_early ? "Stopped" : "Finished",
-                    false,
-                ),
-            );
-        } catch (e) {
-            this.dev_voice_bounce_tasks.remove(task_id);
-            await command.replyOrFollowUp(create_error_reply(`Error: ${e}`), true);
-        }
-    }
-
-    private build_dev_voice_bounce_message(
-        context: dev_voice_bounce_context,
-        completed_round_trips: number,
-        status: string,
-        active: boolean,
-    ): Discord.BaseMessageOptions & CommandAbstractionReplyOptions {
-        const { task_id, issuer_id, target_member, first, second, count } = context;
-        return {
-            embeds: [
-                new Discord.EmbedBuilder()
-                    .setColor(colors.wheatley)
-                    .setTitle("Dev voice bounce")
-                    .setDescription(
-                        [
-                            `Target: <@${target_member.id}>`,
-                            `Route: <#${first.id}> -> <#${second.id}>`,
-                            `Progress: ${completed_round_trips}/${count} round trip${count === 1 ? "" : "s"}`,
-                        ].join("\n"),
-                    )
-                    .setFooter({ text: status }),
-            ],
-            components: active
-                ? [
-                      new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
-                          this.dev_voice_bounce_stop_button
-                              .create_button(task_id, issuer_id)
-                              .setLabel("Stop")
-                              .setStyle(Discord.ButtonStyle.Danger),
-                      ),
-                  ]
-                : [],
-            allowedMentions: { parse: [] },
-        };
-    }
-
-    private async handle_dev_voice_bounce_stop(
-        interaction: Discord.ButtonInteraction,
-        task_id: string,
-        issuer_id: string,
-    ) {
-        if (interaction.user.id !== issuer_id) {
-            const { embeds } = create_error_reply("Only the command issuer can stop this task.");
-            await interaction.reply({
-                embeds,
-                ephemeral: true,
-            });
-            return;
-        }
-        const task = this.dev_voice_bounce_tasks.get(task_id);
-        if (!task) {
-            const { embeds } = create_error_reply("This task is no longer running.");
-            await interaction.reply({
-                embeds,
-                ephemeral: true,
-            });
-            return;
-        }
-        task.keep_running = false;
-        await interaction.update({
-            components: [
-                new Discord.ActionRowBuilder<Discord.MessageActionRowComponentBuilder>().addComponents(
-                    this.dev_voice_bounce_stop_button
-                        .create_button(task_id, issuer_id)
-                        .setLabel("Stopping...")
-                        .setStyle(Discord.ButtonStyle.Secondary)
-                        .setDisabled(true),
-                ),
-            ],
-        });
+        await command.reply(this.build_log_message(target_channel, effective_amount, 0, command.user.id));
     }
 
     private async handle_log_page(
