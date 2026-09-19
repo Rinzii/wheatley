@@ -349,10 +349,10 @@ export class BotTextBasedCommand<Args extends unknown[] = []> extends BaseBotInt
                     } else {
                         throw required_arg_error();
                     }
-                // Even though a discriminated union always will narrow to channel right now. 
-                // If the size of the union grows this could not be the case. 
-                // So explicitly tell eslint that we know that the condition is unneccessary.
-                // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+                    // Even though a discriminated union always will narrow to channel right now.
+                    // If the size of the union grows this could not be the case.
+                    // So explicitly tell eslint that we know that the condition is unneccessary.
+                    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
                 } else if (option.type == "channel") {
                     const re = /^(?:<#(\d{10,})>|(\d{10,}))/;
                     const match = re.exec(command_body);

@@ -71,7 +71,7 @@ export default class GuildLookup extends BotComponent {
         const channels = [...guild.channels.cache.values()].sort((a, b) => {
             const pos_a = a.isThread() ? Number.MAX_SAFE_INTEGER : a.rawPosition;
             const pos_b = b.isThread() ? Number.MAX_SAFE_INTEGER : b.rawPosition;
-        
+
             return pos_a - pos_b || a.id.localeCompare(b.id);
         });
         const pages = Math.ceil(channels.length / CHANNELS_PER_PAGE);
